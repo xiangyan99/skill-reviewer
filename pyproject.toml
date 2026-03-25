@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skill-reviewer"
+version = "0.1.0"
+description = "Harness-based reviewer for Azure SDK skills powered by Azure OpenAI"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "openai>=1.42.0,<3",
+  "pydantic>=2.8,<3",
+  "PyYAML>=6.0.2,<7",
+  "python-dotenv>=1.0.1,<2",
+  "azure-identity>=1.17.1,<2",
+]
+
+[project.scripts]
+skill-reviewer = "skill_reviewer.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

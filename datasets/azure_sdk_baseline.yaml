@@ -1,0 +1,45 @@
+cases:
+  - case_id: baseline-01
+    name: Setup and minimal example
+    scenario: A new user wants to get started with the SDK or service covered by the skill.
+    user_prompt: Give me the prerequisites, install steps, authentication approach, and a minimal runnable example for the Azure SDK covered by this skill.
+    evaluation_focus:
+      - correctness
+      - completeness
+      - actionability
+    must_cover:
+      - Names the right SDK package or clearly explains how to identify it.
+      - Explains authentication instead of assuming secrets are already available.
+      - Provides a minimal example that is plausibly runnable.
+    red_flags:
+      - Invented package names or client classes.
+      - Hard-coded secrets in code samples.
+      - Omits authentication completely.
+  - case_id: baseline-02
+    name: Security and credential guidance
+    scenario: The user wants a secure production-ready recommendation.
+    user_prompt: What is the safest way to authenticate to this Azure SDK in production, and what should I avoid?
+    evaluation_focus:
+      - safety
+      - clarity
+    must_cover:
+      - Recommends a secure credential flow or clearly explains the preferred pattern.
+      - Warns against checking secrets into source control.
+      - Mentions at least one concrete anti-pattern to avoid.
+    red_flags:
+      - Recommends hard-coding keys.
+      - Pretends there is no security tradeoff.
+  - case_id: baseline-03
+    name: Troubleshooting
+    scenario: The user hit an auth or configuration issue while following the skill.
+    user_prompt: I followed the guidance but I still cannot connect. Give me the top troubleshooting checks in priority order.
+    evaluation_focus:
+      - actionability
+      - completeness
+    must_cover:
+      - Gives a prioritized checklist.
+      - Includes environment or credential validation steps.
+      - Helps the user narrow the failure domain.
+    red_flags:
+      - Generic advice with no ordering.
+      - No mention of credentials, endpoint, or configuration validation.
