@@ -18,6 +18,101 @@ _INJECTION_PATTERNS = re.compile(
 
 _ZERO_WIDTH_CHARS = re.compile(r"[\u200b\u200c\u200d\u2060\ufeff]")
 
+# Severe patterns that warrant immediate rejection before LLM review.
+_CRITICAL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(
+            r"ignore\s+(?:all\s+)?(?:previous|above|prior)\s+(?:instructions|prompts|rules)",
+            re.IGNORECASE,
+        ),
+        "Prompt injection: attempts to override reviewer instructions",
+    ),
+    (
+        re.compile(
+            r"you\s+are\s+now\s+(?:a\s+)?(?:new|different)",
+            re.IGNORECASE,
+        ),
+        "Prompt injection: attempts to redefine the model's role",
+    ),
+    (
+        re.compile(
+            r"<\s*/?\s*(?:system|instruction|prompt)\s*>",
+            re.IGNORECASE,
+        ),
+        "Prompt injection: fake system/instruction XML tags",
+    ),
+    (
+        re.compile(
+            r"(?:return|output|respond\s+with)\s+.*?verdict.*?approve",
+            re.IGNORECASE,
+        ),
+        "Prompt injection: attempts to force an approve verdict",
+    ),
+    (
+        re.compile(
+            r"(?:return|output|respond\s+with)\s+.*?score.*?[45]",
+            re.IGNORECASE,
+        ),
+        "Prompt injection: attempts to dictate review scores",
+    ),
+    (
+        re.compile(
+            r"(?:repeat|print|echo|output)\s+(?:your\s+)?(?:system\s+)?(?:instructions|prompt|rules)",
+            re.IGNORECASE,
+        ),
+        "Prompt exfiltration: attempts to extract system instructions",
+    ),
+    (
+        re.compile(
+            r"(?:disregard|forget|override|bypass)\s+(?:all\s+)?(?:prior|previous|above|safety|review)",
+            re.IGNORECASE,
+        ),
+        "Prompt injection: attempts to bypass safety or review rules",
+    ),
+]
+
+
+class PreflightRejection:
+    """Result of a failed pre-flight check — skill is rejected before LLM review."""
+
+    def __init__(self, reasons: list[str]) -> None:
+        self.reasons = reasons
+
+
+def preflight_check(content: str) -> PreflightRejection | None:
+    """Run static checks on raw skill content before any LLM call.
+
+    Returns a PreflightRejection if critical issues are found, None otherwise.
+    """
+    violations: list[str] = []
+
+    # Check for hidden content in HTML comments
+    html_comments = re.findall(r"<!--(.*?)-->", content, flags=re.DOTALL)
+    for comment in html_comments:
+        for pattern, description in _CRITICAL_PATTERNS:
+            if pattern.search(comment):
+                violations.append(f"{description} (hidden in HTML comment)")
+
+    # Check for zero-width character obfuscation at suspicious density
+    zw_count = len(_ZERO_WIDTH_CHARS.findall(content))
+    if zw_count > 10:
+        violations.append(
+            f"Suspicious obfuscation: {zw_count} zero-width characters detected"
+        )
+
+    # Check visible text for critical injection patterns
+    stripped = _strip_html_comments(content)
+    for pattern, description in _CRITICAL_PATTERNS:
+        if pattern.search(stripped):
+            violations.append(description)
+
+    # Dedupe
+    violations = list(dict.fromkeys(violations))
+
+    if violations:
+        return PreflightRejection(violations)
+    return None
+
 
 def _strip_html_comments(text: str) -> str:
     return re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)

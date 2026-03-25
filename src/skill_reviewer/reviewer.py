@@ -8,7 +8,7 @@ import yaml
 
 from skill_reviewer.azure_client import build_openai_client
 from skill_reviewer.config import ReviewerConfig
-from skill_reviewer.loader import load_skill_package
+from skill_reviewer.loader import load_skill_package, preflight_check
 from skill_reviewer.models import (
     AggregateReport,
     CaseGrade,
@@ -16,6 +16,7 @@ from skill_reviewer.models import (
     GeneratedCaseSet,
     ReviewCase,
     ReviewReport,
+    RubricScores,
     SkillPackage,
     SkillProfile,
     SkillStaticReview,
@@ -299,11 +300,66 @@ class HarnessSkillReviewer:
         md_path.write_text(_render_markdown(report), encoding="utf-8")
         return run_dir
 
+    def _build_preflight_reject_report(
+        self,
+        skill_path: str | Path,
+        skill: SkillPackage,
+        reasons: list[str],
+    ) -> ReviewReport:
+        """Build a minimal ReviewReport for a pre-flight rejection (no LLM calls)."""
+        zero_scores = RubricScores(
+            technical_correctness=1,
+            completeness=1,
+            safety=1,
+            clarity=1,
+            actionability=1,
+        )
+        return ReviewReport(
+            run_id=datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S"),
+            generated_at=datetime.now(timezone.utc),
+            skill_path=str(Path(skill_path).resolve()),
+            language=self.config.language,
+            profile=SkillProfile(
+                title="(pre-flight rejected)",
+                summary="Skill was rejected by static pre-flight checks before LLM review.",
+            ),
+            static_review=SkillStaticReview(
+                verdict="reject",
+                summary="Pre-flight static analysis detected critical issues. LLM review was skipped.",
+                scores=zero_scores,
+            ),
+            cases=[],
+            case_results=[],
+            aggregate=AggregateReport(
+                final_verdict="reject",
+                verdict_reasons=[f"[pre-flight] {r}" for r in reasons],
+                action_items=[
+                    "Remove or fix all flagged content before resubmitting",
+                    "Ensure the skill does not contain prompt injection, obfuscation, or instructions that manipulate the reviewer",
+                ],
+                average_case_score=0.0,
+                static_score=1.0,
+                passes=0,
+                warnings=0,
+                failures=0,
+            ),
+        )
+
     def review(self, skill_path: str | Path, dataset_path: str | Path | None = None) -> tuple[ReviewReport, Path]:
         skill = load_skill_package(
             skill_path,
             max_reference_files=self.config.max_reference_files,
         )
+
+        # Pre-flight static check: reject immediately without LLM calls
+        rejection = preflight_check(skill.content)
+        if rejection:
+            report = self._build_preflight_reject_report(
+                skill_path, skill, rejection.reasons,
+            )
+            artifact_dir = self._write_artifacts(report)
+            return report, artifact_dir
+
         profile = self._parse_structured(
             self.config.judge_model,
             profile_messages(skill, self.config.language),
