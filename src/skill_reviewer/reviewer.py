@@ -144,6 +144,7 @@ class HarnessSkillReviewer:
             model=model,
             messages=messages,
             temperature=0,
+            seed=42,
             response_format=schema,
         )
         message = completion.choices[0].message
