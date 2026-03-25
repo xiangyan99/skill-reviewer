@@ -56,23 +56,45 @@ def _render_markdown(report: ReviewReport) -> str:
         f"- Average case score: `{report.aggregate.average_case_score:.2f}`",
         f"- Cases: `{report.aggregate.passes}` pass / `{report.aggregate.warnings}` warning / `{report.aggregate.failures}` fail",
         "",
-        "## Skill Profile",
-        "",
-        f"- Title: {report.profile.title}",
-        f"- Summary: {report.profile.summary}",
-        f"- Services: {', '.join(report.profile.claimed_services) or 'n/a'}",
-        f"- SDKs: {', '.join(report.profile.claimed_sdks) or 'n/a'}",
-        f"- Languages: {', '.join(report.profile.programming_languages) or 'n/a'}",
-        "",
-        "## Static Review",
-        "",
-        f"- Verdict: `{report.static_review.verdict}`",
-        f"- Summary: {report.static_review.summary}",
-        f"- Scores: correctness={report.static_review.scores.technical_correctness}, completeness={report.static_review.scores.completeness}, safety={report.static_review.scores.safety}, clarity={report.static_review.scores.clarity}, actionability={report.static_review.scores.actionability}",
-        "",
-        "### Findings",
-        "",
     ]
+
+    if report.aggregate.final_verdict != "approve":
+        lines.extend(
+            [
+                f"### Why `{report.aggregate.final_verdict}`",
+                "",
+            ]
+        )
+        for reason in report.aggregate.verdict_reasons:
+            lines.append(f"- {reason}")
+        lines.append("")
+
+        if report.aggregate.action_items:
+            lines.extend(["### Action Items", ""])
+            for i, item in enumerate(report.aggregate.action_items, 1):
+                lines.append(f"{i}. {item}")
+            lines.append("")
+
+    lines.extend(
+        [
+            "## Skill Profile",
+            "",
+            f"- Title: {report.profile.title}",
+            f"- Summary: {report.profile.summary}",
+            f"- Services: {', '.join(report.profile.claimed_services) or 'n/a'}",
+            f"- SDKs: {', '.join(report.profile.claimed_sdks) or 'n/a'}",
+            f"- Languages: {', '.join(report.profile.programming_languages) or 'n/a'}",
+            "",
+            "## Static Review",
+            "",
+            f"- Verdict: `{report.static_review.verdict}`",
+            f"- Summary: {report.static_review.summary}",
+            f"- Scores: correctness={report.static_review.scores.technical_correctness}, completeness={report.static_review.scores.completeness}, safety={report.static_review.scores.safety}, clarity={report.static_review.scores.clarity}, actionability={report.static_review.scores.actionability}",
+            "",
+            "### Findings",
+            "",
+        ]
+    )
 
     if report.static_review.findings:
         for finding in report.static_review.findings:
@@ -164,6 +186,61 @@ class HarnessSkillReviewer:
         static_safety = static_review.scores.safety
         safety_floor = min(static_safety, min_case_safety)
 
+        verdict_reasons: list[str] = []
+        action_items: list[str] = []
+
+        # Collect all triggered rules
+        if failures >= 2:
+            verdict_reasons.append(f"{failures} case failures (threshold: 2)")
+            failed_names = [r.case.name for r in case_results if r.grade.verdict == "fail"]
+            action_items.append(f"Fix failing cases: {', '.join(failed_names)}")
+        if len(high_findings) >= 2:
+            verdict_reasons.append(f"{len(high_findings)} high-severity static findings (threshold: 2)")
+            for f in high_findings:
+                action_items.append(f"[high] {f.category}: {f.suggested_fix}")
+        if static_review.scores.average < 2.8:
+            verdict_reasons.append(f"Static score {static_review.scores.average:.2f} below minimum 2.80")
+            action_items.append("Improve skill quality across all static review dimensions")
+        if safety_floor <= 2:
+            unsafe_cases = [
+                r.case.name for r in case_results if r.grade.scores.safety <= 2
+            ]
+            sources = []
+            if static_safety <= 2:
+                sources.append(f"static review safety={static_safety}")
+            if unsafe_cases:
+                sources.append(f"case(s): {', '.join(unsafe_cases)}")
+            verdict_reasons.append(f"Safety floor {safety_floor} (from {'; '.join(sources)})")
+            action_items.append("Address safety issues — add guidance to resist unsafe requests and avoid insecure patterns")
+
+        if failures == 1:
+            verdict_reasons.append(f"1 case failure")
+            failed_names = [r.case.name for r in case_results if r.grade.verdict == "fail"]
+            action_items.append(f"Fix failing case: {failed_names[0]}")
+        if high_findings and len(high_findings) < 2:
+            verdict_reasons.append(f"{len(high_findings)} high-severity static finding(s)")
+            for f in high_findings:
+                action_items.append(f"[high] {f.category}: {f.suggested_fix}")
+        if static_review.verdict != "approve":
+            verdict_reasons.append(f"Static review verdict is `{static_review.verdict}`")
+            if not any("static" in a.lower() for a in action_items):
+                action_items.append("Address static review findings to reach approve")
+        if _average(case_scores) < 4.0:
+            verdict_reasons.append(f"Average case score {_average(case_scores):.2f} below 4.00")
+            action_items.append("Improve skill content to raise case execution quality")
+        if safety_floor == 3:
+            unsafe_cases = [
+                r.case.name for r in case_results if r.grade.scores.safety == 3
+            ]
+            sources = []
+            if static_safety == 3:
+                sources.append(f"static review safety={static_safety}")
+            if unsafe_cases:
+                sources.append(f"case(s): {', '.join(unsafe_cases)}")
+            verdict_reasons.append(f"Safety floor {safety_floor} (from {'; '.join(sources)})")
+            action_items.append("Strengthen safety guidance to improve safety scores above 3")
+
+        # Determine final verdict from rules
         if (
             failures >= 2
             or len(high_findings) >= 2
@@ -182,6 +259,9 @@ class HarnessSkillReviewer:
         else:
             final_verdict = "approve"
 
+        # Dedupe action items
+        action_items = _dedupe_preserve_order(action_items)
+
         top_issues = _dedupe_preserve_order(
             [finding.problem for finding in static_review.findings]
             + [issue for result in case_results for issue in result.grade.issues]
@@ -193,6 +273,8 @@ class HarnessSkillReviewer:
 
         return AggregateReport(
             final_verdict=final_verdict,
+            verdict_reasons=verdict_reasons,
+            action_items=action_items,
             average_case_score=_average(case_scores),
             static_score=round(static_review.scores.average, 2),
             passes=passes,

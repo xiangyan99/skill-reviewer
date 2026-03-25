@@ -93,6 +93,8 @@ class CaseResult(BaseModel):
 
 class AggregateReport(BaseModel):
     final_verdict: Literal["approve", "needs_revision", "reject"]
+    verdict_reasons: list[str] = Field(default_factory=list)
+    action_items: list[str] = Field(default_factory=list)
     average_case_score: float
     static_score: float
     passes: int
