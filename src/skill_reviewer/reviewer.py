@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -9,11 +12,17 @@ import yaml
 from skill_reviewer.azure_client import build_openai_client
 from skill_reviewer.config import ReviewerConfig
 from skill_reviewer.loader import load_skill_package, preflight_check
+
+logger = logging.getLogger(__name__)
+from skill_reviewer.code_validator import validate_answer_code
 from skill_reviewer.models import (
     AggregateReport,
     CaseGrade,
     CaseResult,
+    CodeValidation,
     GeneratedCaseSet,
+    MustCoverResult,
+    RedFlagResult,
     ReviewCase,
     ReviewReport,
     RubricScores,
@@ -28,6 +37,11 @@ from skill_reviewer.prompts import (
     profile_messages,
     static_review_messages,
 )
+
+
+def _skill_fingerprint(content: str) -> str:
+    """Stable SHA-256 fingerprint of skill content for cache keying."""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
 
 
 def _dedupe_preserve_order(values: list[str]) -> list[str]:
@@ -52,10 +66,14 @@ def _render_markdown(report: ReviewReport) -> str:
         "",
         f"- Run ID: `{report.run_id}`",
         f"- Skill: `{report.skill_path}`",
+        f"- Fingerprint: `{report.skill_fingerprint}`",
         f"- Final verdict: `{report.aggregate.final_verdict}`",
         f"- Static score: `{report.aggregate.static_score:.2f}`",
         f"- Average case score: `{report.aggregate.average_case_score:.2f}`",
         f"- Cases: `{report.aggregate.passes}` pass / `{report.aggregate.warnings}` warning / `{report.aggregate.failures}` fail",
+        f"- Must-cover: `{report.aggregate.must_cover_met}` / `{report.aggregate.must_cover_total}` met",
+        f"- Red flags: `{report.aggregate.red_flags_triggered}` / `{report.aggregate.red_flags_total}` triggered",
+        f"- Code blocks: `{report.aggregate.code_blocks_total}` found, `{report.aggregate.code_syntax_errors}` syntax errors, `{report.aggregate.code_security_issues}` security issues",
         "",
     ]
 
@@ -115,10 +133,57 @@ def _render_markdown(report: ReviewReport) -> str:
             [
                 f"### {result.case.case_id} - {result.case.name}",
                 "",
+                f"- Category: `{result.case.category}` | Difficulty: `{result.case.difficulty}`",
                 f"- Verdict: `{result.grade.verdict}`",
                 f"- Summary: {result.grade.summary}",
                 f"- Scores: correctness={result.grade.scores.technical_correctness}, completeness={result.grade.scores.completeness}, safety={result.grade.scores.safety}, clarity={result.grade.scores.clarity}, actionability={result.grade.scores.actionability}",
                 f"- Prompt: {result.case.user_prompt}",
+                "",
+            ]
+        )
+
+        # Must-cover results
+        if result.grade.must_cover_results:
+            lines.append("**Must-cover checklist:**")
+            lines.append("")
+            for mc in result.grade.must_cover_results:
+                icon = "PASS" if mc.met else "MISS"
+                lines.append(f"- [{icon}] {mc.criterion}")
+                if mc.evidence:
+                    lines.append(f"  - Evidence: {mc.evidence}")
+            lines.append("")
+
+        # Red flag results
+        if result.grade.red_flag_results:
+            lines.append("**Red-flag checklist:**")
+            lines.append("")
+            for rf in result.grade.red_flag_results:
+                icon = "TRIGGERED" if rf.triggered else "OK"
+                lines.append(f"- [{icon}] {rf.flag}")
+                if rf.evidence:
+                    lines.append(f"  - Evidence: {rf.evidence}")
+            lines.append("")
+
+        # Code validation results
+        if result.code_validation is not None:
+            cv = result.code_validation
+            lines.append("**Code validation:**")
+            lines.append("")
+            lines.append(
+                f"- Blocks: {cv.blocks_found} | "
+                f"Syntax: {'valid' if cv.syntax_valid else 'ERRORS'} | "
+                f"Security: {'issues found' if cv.has_security_issues else 'clean'}"
+            )
+            if cv.blocks:
+                langs = [b.language or "unknown" for b in cv.blocks]
+                lines.append(f"- Languages: {', '.join(langs)}")
+            if cv.issues:
+                for issue in cv.issues:
+                    lines.append(f"- [{issue.severity}] [{issue.category}] {issue.message}")
+            lines.append("")
+
+        lines.extend(
+            [
                 f"- Issues: {'; '.join(result.grade.issues) or 'none'}",
                 f"- Recommended edits: {'; '.join(result.grade.recommended_edits) or 'none'}",
                 "",
@@ -140,12 +205,12 @@ class HarnessSkillReviewer:
         self.config = config
         self.client = build_openai_client(config)
 
-    def _parse_structured(self, model: str, messages: list[dict[str, str]], schema):
+    def _parse_structured(self, model: str, messages: list[dict[str, str]], schema, *, seed: int = 42):
         completion = self.client.beta.chat.completions.parse(
             model=model,
             messages=messages,
             temperature=0,
-            seed=42,
+            seed=seed,
             response_format=schema,
         )
         message = completion.choices[0].message
@@ -169,6 +234,88 @@ class HarnessSkillReviewer:
         payload = yaml.safe_load(dataset_path.read_text(encoding="utf-8"))
         case_set = GeneratedCaseSet.model_validate(payload)
         return case_set.cases
+
+    def _case_cache_path(self, fingerprint: str) -> Path | None:
+        cache_dir = self.config.case_cache_dir
+        if cache_dir is None:
+            return None
+        return cache_dir / f"cases_{fingerprint}.yaml"
+
+    def _load_cached_cases(self, fingerprint: str) -> list[ReviewCase] | None:
+        path = self._case_cache_path(fingerprint)
+        if path is None or not path.exists():
+            return None
+        try:
+            payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+            case_set = GeneratedCaseSet.model_validate(payload)
+            logger.info("Loaded %d cached cases from %s", len(case_set.cases), path)
+            return case_set.cases
+        except Exception:
+            logger.warning("Failed to load case cache %s, regenerating", path)
+            return None
+
+    def _save_cached_cases(self, fingerprint: str, cases: list[ReviewCase]) -> None:
+        path = self._case_cache_path(fingerprint)
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = GeneratedCaseSet(cases=cases).model_dump(mode="json")
+        path.write_text(
+            yaml.dump(payload, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+        logger.info("Saved %d cases to cache %s", len(cases), path)
+
+    def _grade_with_consensus(
+        self,
+        skill: SkillPackage,
+        case: ReviewCase,
+        assistant_answer: str,
+        code_validation: CodeValidation | None = None,
+    ) -> CaseGrade:
+        """Run grading `grade_rounds` times and return the consensus result.
+
+        When grade_rounds == 1, this is equivalent to a single grading call.
+        When grade_rounds > 1, the verdict is decided by majority vote and
+        scores are taken from the median-scoring round.
+        """
+        rounds = max(1, self.config.grade_rounds)
+        grades: list[CaseGrade] = []
+        for i in range(rounds):
+            grade = self._parse_structured(
+                self.config.judge_model,
+                grade_messages(
+                    skill, case, assistant_answer, self.config.language,
+                    code_validation=code_validation,
+                ),
+                CaseGrade,
+                seed=42 + i,
+            )
+            grades.append(grade)
+
+        if rounds == 1:
+            return grades[0]
+
+        # Majority vote on verdict
+        verdict_counts = Counter(g.verdict for g in grades)
+        consensus_verdict = verdict_counts.most_common(1)[0][0]
+
+        # Pick the grade whose scores are closest to the median
+        median_avg = sorted(g.scores.average for g in grades)[rounds // 2]
+        best = min(grades, key=lambda g: abs(g.scores.average - median_avg))
+
+        # Override verdict with consensus if it differs
+        if best.verdict != consensus_verdict:
+            best = best.model_copy(update={"verdict": consensus_verdict})
+
+        logger.info(
+            "Case %s: %d rounds, verdicts=%s, consensus=%s",
+            case.case_id,
+            rounds,
+            dict(verdict_counts),
+            consensus_verdict,
+        )
+        return best
 
     def _aggregate(
         self,
@@ -264,14 +411,103 @@ class HarnessSkillReviewer:
         # Dedupe action items
         action_items = _dedupe_preserve_order(action_items)
 
+        # Surface missed must_cover items as issues
+        missed_must_cover = []
+        for result in case_results:
+            for mc in result.grade.must_cover_results:
+                if not mc.met:
+                    missed_must_cover.append(
+                        f"[{result.case.case_id}] Must-cover missed: {mc.criterion}"
+                    )
+
+        # Surface triggered red flags as issues
+        triggered_red_flags = []
+        for result in case_results:
+            for rf in result.grade.red_flag_results:
+                if rf.triggered:
+                    triggered_red_flags.append(
+                        f"[{result.case.case_id}] Red flag triggered: {rf.flag}"
+                    )
+
+        if missed_must_cover:
+            verdict_reasons.append(
+                f"{len(missed_must_cover)} must-cover criteria missed across cases"
+            )
+            action_items.extend(missed_must_cover[:5])
+
+        if triggered_red_flags:
+            verdict_reasons.append(
+                f"{len(triggered_red_flags)} red flag(s) triggered across cases"
+            )
+            action_items.extend(triggered_red_flags[:5])
+
         top_issues = _dedupe_preserve_order(
             [finding.problem for finding in static_review.findings]
+            + triggered_red_flags
+            + missed_must_cover
             + [issue for result in case_results for issue in result.grade.issues]
-        )[:8]
+        )[:10]
         top_recommendations = _dedupe_preserve_order(
             static_review.improvement_ideas
             + [edit for result in case_results for edit in result.grade.recommended_edits]
         )[:8]
+
+        # Compute must-cover / red-flag aggregate stats
+        mc_total = sum(
+            len(r.grade.must_cover_results) for r in case_results
+        )
+        mc_met = sum(
+            1 for r in case_results for mc in r.grade.must_cover_results if mc.met
+        )
+        rf_total = sum(
+            len(r.grade.red_flag_results) for r in case_results
+        )
+        rf_triggered = sum(
+            1 for r in case_results for rf in r.grade.red_flag_results if rf.triggered
+        )
+
+        # Compute code validation aggregate stats
+        code_blocks_total = sum(
+            r.code_validation.blocks_found
+            for r in case_results if r.code_validation
+        )
+        code_syntax_errors = sum(
+            1 for r in case_results
+            if r.code_validation and not r.code_validation.syntax_valid
+        )
+        code_security_issues = sum(
+            1 for r in case_results
+            if r.code_validation and r.code_validation.has_security_issues
+        )
+
+        # Surface code validation problems
+        if code_syntax_errors:
+            syntax_cases = [
+                r.case.name for r in case_results
+                if r.code_validation and not r.code_validation.syntax_valid
+            ]
+            verdict_reasons.append(
+                f"Code syntax errors in {code_syntax_errors} case(s): {', '.join(syntax_cases)}"
+            )
+            action_items.append("Fix code examples to eliminate syntax errors")
+
+        if code_security_issues:
+            sec_cases = [
+                r.case.name for r in case_results
+                if r.code_validation and r.code_validation.has_security_issues
+            ]
+            verdict_reasons.append(
+                f"Code security issues in {code_security_issues} case(s): {', '.join(sec_cases)}"
+            )
+            action_items.append("Remove hardcoded secrets and insecure patterns from code examples in the skill")
+
+        # Code validation can escalate verdict
+        if code_security_issues >= 2 or (code_syntax_errors >= 2 and final_verdict == "approve"):
+            final_verdict = max(
+                final_verdict,
+                "needs_revision",
+                key=lambda v: {"approve": 0, "needs_revision": 1, "reject": 2}[v],
+            )
 
         return AggregateReport(
             final_verdict=final_verdict,
@@ -282,6 +518,13 @@ class HarnessSkillReviewer:
             passes=passes,
             warnings=warnings,
             failures=failures,
+            must_cover_total=mc_total,
+            must_cover_met=mc_met,
+            red_flags_total=rf_total,
+            red_flags_triggered=rf_triggered,
+            code_blocks_total=code_blocks_total,
+            code_syntax_errors=code_syntax_errors,
+            code_security_issues=code_security_issues,
             top_issues=top_issues,
             top_recommendations=top_recommendations,
         )
@@ -350,62 +593,97 @@ class HarnessSkillReviewer:
             skill_path,
             max_reference_files=self.config.max_reference_files,
         )
+        fingerprint = _skill_fingerprint(skill.content)
 
         # Pre-flight static check: reject immediately without LLM calls
+        print("[1/6] Running pre-flight security checks...")
         rejection = preflight_check(skill.content)
         if rejection:
+            print(f"  REJECTED: {len(rejection.reasons)} critical issue(s) found")
             report = self._build_preflight_reject_report(
                 skill_path, skill, rejection.reasons,
             )
             artifact_dir = self._write_artifacts(report)
             return report, artifact_dir
+        print("  Passed")
 
+        print("[2/6] Extracting skill profile...")
         profile = self._parse_structured(
             self.config.judge_model,
             profile_messages(skill, self.config.language),
             SkillProfile,
         )
+        print(f"  Title: {profile.title}")
+
+        print("[3/6] Running static review...")
         static_review = self._parse_structured(
             self.config.judge_model,
             static_review_messages(skill, profile, self.config.language),
             SkillStaticReview,
         )
+        print(f"  Verdict: {static_review.verdict} | Score: {static_review.scores.average:.2f} | Findings: {len(static_review.findings)}")
 
+        print("[4/6] Loading test cases...")
         if dataset_path:
             cases = self._load_dataset(Path(dataset_path).resolve())
+            print(f"  Loaded {len(cases)} case(s) from dataset")
         else:
-            generated = self._parse_structured(
-                self.config.judge_model,
-                case_generation_messages(
-                    skill,
-                    profile,
-                    self.config.language,
-                    self.config.max_generated_cases,
-                ),
-                GeneratedCaseSet,
-            )
-            cases = generated.cases
+            # Try loading cached cases for this skill fingerprint
+            cases = self._load_cached_cases(fingerprint)
+            if cases is None:
+                print("  Generating cases...")
+                generated = self._parse_structured(
+                    self.config.judge_model,
+                    case_generation_messages(
+                        skill,
+                        profile,
+                        self.config.language,
+                        self.config.max_generated_cases,
+                    ),
+                    GeneratedCaseSet,
+                )
+                cases = generated.cases
+                self._save_cached_cases(fingerprint, cases)
+                print(f"  Generated {len(cases)} case(s)")
+            else:
+                print(f"  Loaded {len(cases)} cached case(s)")
 
+        print(f"[5/6] Executing and grading {len(cases)} case(s)...")
         case_results: list[CaseResult] = []
-        for case in cases:
+        for i, case in enumerate(cases, 1):
+            print(f"  [{i}/{len(cases)}] {case.case_id}: {case.name}", end="", flush=True)
             assistant_answer = self._run_case(skill, case)
-            grade = self._parse_structured(
-                self.config.judge_model,
-                grade_messages(skill, case, assistant_answer, self.config.language),
-                CaseGrade,
+
+            # Run code validation for cases that require or contain code
+            code_validation = None
+            if case.requires_code or case.category == "code_generation" or "```" in assistant_answer:
+                requires = case.requires_code or case.category == "code_generation"
+                code_validation = validate_answer_code(
+                    answer=assistant_answer,
+                    expected_sdks=profile.claimed_sdks,
+                    requires_code=requires,
+                )
+
+            grade = self._grade_with_consensus(
+                skill, case, assistant_answer,
+                code_validation=code_validation,
             )
             case_results.append(
                 CaseResult(
                     case=case,
                     assistant_answer=assistant_answer,
+                    code_validation=code_validation,
                     grade=grade,
                 )
             )
+            print(f" -> {grade.verdict} ({grade.scores.average:.1f})")
 
+        print("[6/6] Aggregating results...")
         report = ReviewReport(
             run_id=datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S"),
             generated_at=datetime.now(timezone.utc),
             skill_path=str(Path(skill_path).resolve()),
+            skill_fingerprint=fingerprint,
             language=self.config.language,
             profile=profile,
             static_review=static_review,
@@ -414,4 +692,11 @@ class HarnessSkillReviewer:
             aggregate=self._aggregate(static_review, case_results),
         )
         artifact_dir = self._write_artifacts(report)
+        agg = report.aggregate
+        print(
+            f"\nDone! Verdict: {agg.final_verdict} | "
+            f"Score: {agg.average_case_score:.2f} | "
+            f"{agg.passes}P/{agg.warnings}W/{agg.failures}F | "
+            f"Report: {artifact_dir}"
+        )
         return report, artifact_dir

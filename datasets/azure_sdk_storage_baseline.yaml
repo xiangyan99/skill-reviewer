@@ -1,0 +1,222 @@
+cases:
+  - case_id: storage-01
+    name: Setup and minimal example
+    category: happy_path
+    difficulty: basic
+    scenario: A new user wants to get started with Azure Blob Storage in Python.
+    user_prompt: Give me the prerequisites, install steps, authentication approach, and a minimal runnable example for Azure Blob Storage using the Python SDK.
+    evaluation_focus:
+      - correctness
+      - completeness
+      - actionability
+    must_cover:
+      - Installs azure-storage-blob and azure-identity packages.
+      - Uses DefaultAzureCredential from azure.identity for authentication.
+      - Constructs BlobServiceClient with an account URL endpoint and credential.
+      - Provides a minimal example that uploads, lists, downloads, or deletes a blob.
+    red_flags:
+      - Uses connection strings or hard-coded account keys.
+      - Imports from deprecated azure.storage instead of azure.storage.blob.
+      - Invents non-existent classes or methods.
+
+  - case_id: storage-02
+    name: Secure authentication configuration
+    category: security
+    difficulty: intermediate
+    scenario: The user wants a production-ready, secure way to authenticate to Azure Blob Storage with managed identity.
+    user_prompt: What is the safest way to authenticate to Azure Blob Storage in production Python code? I want to use managed identity and read the storage endpoint from an environment variable. Show me a configuration class.
+    evaluation_focus:
+      - safety
+      - correctness
+      - clarity
+    must_cover:
+      - Uses DefaultAzureCredential or ManagedIdentityCredential from azure.identity.
+      - Reads the storage account endpoint from an environment variable.
+      - Does not use connection strings, account keys, or SAS tokens in source code.
+      - Warns against checking secrets into source control.
+    red_flags:
+      - Hard-codes account keys or connection strings.
+      - Uses StorageSharedKeyCredential with a literal key.
+      - Omits authentication entirely or assumes credentials are pre-configured without explanation.
+
+  - case_id: storage-03
+    name: Blob CRUD operations service class
+    category: code_generation
+    difficulty: intermediate
+    requires_code: true
+    expected_language: python
+    scenario: The user needs a reusable service class wrapping common blob operations.
+    user_prompt: Create a Python service class that wraps Azure Blob Storage operations for upload (with optional metadata and blob index tags), download, list blobs in a container, and delete. Use the azure-storage-blob SDK.
+    evaluation_focus:
+      - correctness
+      - completeness
+      - actionability
+    must_cover:
+      - Implements upload, download, list, and delete methods.
+      - Upload accepts optional metadata dict and tags dict parameters.
+      - Sets blob index tags via the tags parameter on upload, not as a separate call.
+      - Uses BlobServiceClient or ContainerClient from azure.storage.blob.
+    red_flags:
+      - Confuses metadata with blob index tags.
+      - Uses deprecated v2 azure.storage APIs (BlockBlobService, CloudStorageAccount).
+      - Missing any of the four CRUD operations.
+
+  - case_id: storage-04
+    name: Large file upload
+    category: edge_case
+    difficulty: intermediate
+    scenario: The user needs to upload multi-gigabyte files efficiently without loading the entire file into memory.
+    user_prompt: How do I upload very large files (multi-GB) to Azure Blob Storage in Python without loading the whole file into memory? I need parallel block upload with configurable thresholds.
+    evaluation_focus:
+      - correctness
+      - completeness
+      - actionability
+    must_cover:
+      - Uses max_single_put_size to control when the SDK switches to block upload.
+      - Configures max_block_size for chunked upload.
+      - Sets max_concurrency for parallel block upload.
+      - Streams data or uses upload_blob with a file-like object rather than reading entirely into memory.
+    red_flags:
+      - Loads the entire file into memory with read() then passes bytes.
+      - Implements manual chunking instead of using SDK parallel transfer options.
+
+  - case_id: storage-05
+    name: Blob lease for concurrent write protection
+    category: happy_path
+    difficulty: intermediate
+    scenario: The user needs to prevent concurrent writers from overwriting each other when updating the same blob.
+    user_prompt: How do I use blob leases in Python to prevent concurrent writers from overwriting each other's changes when updating an Azure blob?
+    evaluation_focus:
+      - correctness
+      - completeness
+      - actionability
+    must_cover:
+      - Uses BlobLeaseClient from azure.storage.blob to acquire a lease on the blob.
+      - Acquires the lease before performing the overwrite.
+      - Passes the lease ID when uploading or modifying the blob.
+      - Releases or breaks the lease after the operation completes.
+    red_flags:
+      - Uploads without acquiring a lease first.
+      - Does not pass the lease ID to the upload call.
+      - Uses a custom locking mechanism instead of the SDK lease API.
+
+  - case_id: storage-06
+    name: Retry policy and HTTP logging
+    category: edge_case
+    difficulty: advanced
+    scenario: The user wants the storage client to behave predictably under transient failures with custom retry and logging.
+    user_prompt: Configure an Azure Blob Storage Python client with a custom retry policy using exponential backoff (configurable max retries and delay), a per-request timeout, and HTTP request/response logging at a configurable level.
+    evaluation_focus:
+      - correctness
+      - completeness
+      - actionability
+    must_cover:
+      - Configures retry policy with exponential backoff via the SDK client constructor or policy.
+      - Sets max retries and retry delay parameters.
+      - Sets a per-operation or per-request timeout.
+      - Enables HTTP logging via logging_enable or logging_policy, or configures Python logging for azure.storage.blob.
+    red_flags:
+      - Implements manual retry loops instead of using the SDK retry configuration.
+      - Hardcodes all retry values with no way to change them.
+      - Omits timeout configuration entirely.
+
+  - case_id: storage-07
+    name: Async implementation
+    category: code_generation
+    difficulty: advanced
+    requires_code: true
+    expected_language: python
+    scenario: The user needs an async version of the blob storage service using the Python async SDK.
+    user_prompt: Give me an async Python implementation of an Azure Blob Storage service class that uploads, downloads, lists, and deletes blobs using the async azure-storage-blob SDK. Show how to run it.
+    evaluation_focus:
+      - correctness
+      - completeness
+      - actionability
+    must_cover:
+      - Imports async clients from azure.storage.blob.aio (BlobServiceClient, ContainerClient, or BlobClient).
+      - Uses async/await syntax throughout.
+      - Uses AsyncDefaultAzureCredential from azure.identity.aio or DefaultAzureCredential with async client.
+      - Properly closes the async client (async context manager or explicit close).
+    red_flags:
+      - Wraps sync client in a thread pool instead of using native async client.
+      - Uses sync BlobServiceClient from azure.storage.blob in async code.
+      - Does not close async client or context manager.
+
+  - case_id: storage-08
+    name: Error handling
+    category: troubleshooting
+    difficulty: intermediate
+    scenario: The user wants robust error handling for blob storage operations.
+    user_prompt: What exceptions should I catch when working with Azure Blob Storage in Python? Show me proper error handling for common failure scenarios like missing containers, auth failures, and network issues.
+    evaluation_focus:
+      - correctness
+      - completeness
+      - actionability
+    must_cover:
+      - Catches HttpResponseError or ResourceNotFoundError from azure.core.exceptions.
+      - Handles authentication errors (CredentialUnavailableError or ClientAuthenticationError).
+      - Extracts and logs the HTTP status code from storage errors.
+      - Handles at least two distinct error scenarios (e.g., 404 not found, 403 forbidden, 409 conflict).
+    red_flags:
+      - Does not import or reference any azure.core.exceptions types.
+
+  - case_id: storage-09
+    name: End-to-end demo
+    category: code_generation
+    difficulty: advanced
+    requires_code: true
+    expected_language: python
+    scenario: The user wants a complete runnable demo that wires everything together.
+    user_prompt: Create a complete Python script that demos Azure Blob Storage operations end-to-end. It should upload a sample file with index tags, list blobs, download it back, acquire a lease and overwrite it, then delete it. Print status at each step. Use DefaultAzureCredential.
+    evaluation_focus:
+      - correctness
+      - completeness
+      - actionability
+    must_cover:
+      - Demonstrates all operations in sequence (upload, list, download, lease+overwrite, delete).
+      - Uses DefaultAzureCredential for authentication.
+      - Sets blob index tags during upload.
+      - Acquires a blob lease before overwriting.
+      - Prints status or progress at each step.
+    red_flags:
+      - Skips the lease step when overwriting.
+      - Uses connection strings or account keys.
+      - Missing any of the five demo steps.
+
+  - case_id: storage-10
+    name: Troubleshooting connection failures
+    category: troubleshooting
+    difficulty: intermediate
+    scenario: The user followed the guidance but cannot connect to Azure Blob Storage.
+    user_prompt: I set up DefaultAzureCredential and BlobServiceClient but I get authentication errors when connecting to Azure Blob Storage. Give me the top troubleshooting checks in priority order.
+    evaluation_focus:
+      - actionability
+      - completeness
+    must_cover:
+      - Gives a prioritized checklist of troubleshooting steps.
+      - Checks that the correct environment variables are set (AZURE_STORAGE_ACCOUNT or endpoint URL).
+      - Validates that DefaultAzureCredential can obtain a token (e.g., az login, managed identity config).
+      - Verifies RBAC role assignments on the storage account (Storage Blob Data Contributor or similar).
+    red_flags:
+      - Generic advice with no ordering or prioritization.
+      - Suggests using connection strings or account keys as the fix.
+      - No mention of RBAC role assignments or credential validation.
+
+  - case_id: storage-11
+    name: Misleading API request
+    category: adversarial
+    difficulty: advanced
+    scenario: The user references a non-existent SDK feature and asks the assistant to use it, testing whether the skill prevents hallucination.
+    user_prompt: Show me how to use BlobServiceClient.batch_delete_by_tags() to delete all blobs matching a tag filter in one call. I heard this was added in azure-storage-blob 12.20.
+    evaluation_focus:
+      - correctness
+      - safety
+    must_cover:
+      - Acknowledges that batch_delete_by_tags() does not exist in the azure-storage-blob SDK.
+      - Does not fabricate method signatures, parameters, or behavior for the non-existent API.
+      - Offers a correct alternative approach (e.g., find_blobs_by_tags plus individual delete, or a loop-based pattern).
+      - Uses real azure-storage-blob classes and methods in any alternative code.
+    red_flags:
+      - Produces code using the fabricated batch_delete_by_tags() method as if it exists.
+      - Invents other non-existent convenience methods without disclaimers.
+      - Agrees with the false version claim without verification.

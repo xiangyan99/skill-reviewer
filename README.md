@@ -1,40 +1,93 @@
 # Azure SDK Skill Reviewer
 
-This is a skill reviewer that breaks review into four reproducible stages, rather than simply asking a model "is this skill good?":
 
-1. `Profile`: Extract the skill's declared scope, target audience, and covered Azure services & SDKs.
-2. `Static Review`: Review the skill text directly, checking for correctness, completeness, security, clarity, and actionability.
-3. `Execution Harness`: Treat the skill as a developer prompt under test, run a set of user scenarios, and observe whether the model can produce trustworthy answers.
-4. `Judge`: Use a stronger review model to score each scenario, outputting pass/fail status, issues found, and improvement suggestions.
+A harness-based reviewer for Azure SDK skills powered by Azure OpenAI. Rather than simply asking a model "is this skill good?", it breaks the review into four reproducible stages:
+
+1. **Profile** — Extract the skill's declared scope, target audience, and covered Azure services & SDKs.
+2. **Static Review** — Review the skill text directly, scoring technical correctness, completeness, safety, clarity, and actionability.
+3. **Execution Harness** — Treat the skill as a developer prompt under test. Run a set of categorized user scenarios (happy path, security, troubleshooting, edge case, adversarial, code generation) and observe whether the model can produce trustworthy answers. For code generation cases, the generated code is automatically validated for syntax correctness, security anti-patterns, and completeness.
+4. **Judge** — Use a stronger review model to grade each scenario against a must-cover checklist and red-flag checklist, combining automated code validation results with LLM judgment to output pass/warning/fail status with evidence.
 
 The core benefit: every time a new skill is submitted, you get an evidence-backed review report instead of subjective comments that are hard to regression-test.
 
 ## Use Cases
 
-- Gate new Azure SDK skill submissions with an admission check
+- Gate new Azure SDK skill submissions with an automated admission check
 - Run regression evaluations after modifying an existing skill
 - Block "looks right but is actually unreliable" skills from merging in CI
 
-## Current Implementation
+## Review Pipeline
 
-- Written in `Python`
-- Uses the `AzureOpenAI` client on Azure OpenAI
-- Supports `API Key` or `Microsoft Entra ID` authentication
-- Default outputs:
-  - `report.json`
-  - `report.md`
+```
+Skill Package
+    │
+    ▼
+┌──────────────────┐
+│  Preflight Check │──▶ Reject (prompt injection, obfuscation)
+└────────┬─────────┘
+         │
+         ▼
+┌──────────────────┐
+│     Profile      │──▶ SkillProfile (title, services, SDKs, tasks)
+└────────┬─────────┘
+         │
+         ▼
+┌──────────────────┐
+│  Static Review   │──▶ SkillStaticReview (scores, findings)
+└────────┬─────────┘
+         │
+         ▼
+┌──────────────────┐     ┌──────────────────┐
+│ Case Generation  │────▶│  Case Caching    │
+│  (or Dataset)    │     │  (fingerprint)   │
+└────────┬─────────┘     └──────────────────┘
+         │
+         ▼
+┌──────────────────┐
+│  Case Execution  │──▶ Assistant answers (seed=42)
+└────────┬─────────┘
+         │
+         ▼
+┌──────────────────┐
+│ Code Validation  │──▶ Syntax check, security scan, completeness
+│ (if code present)│    (automated, no LLM needed)
+└────────┬─────────┘
+         │
+         ▼
+┌──────────────────┐
+│  Grading (Judge) │──▶ CaseGrade (checklists + code validation evidence)
+│  × N rounds      │    Majority-vote consensus
+└────────┬─────────┘
+         │
+         ▼
+┌──────────────────┐
+│   Aggregation    │──▶ Final verdict: approve / needs_revision / reject
+└──────────────────┘
+```
 
 ## Installation
 
 ```bash
 python -m venv .venv
-. .venv/Scripts/Activate.ps1
+
+# Windows
+.venv\Scripts\activate
+
+# Linux / macOS
+source .venv/bin/activate
+
 pip install -e .
+```
+
+For Microsoft Entra ID authentication (optional):
+
+```bash
+pip install -e ".[identity]"
 ```
 
 ## Configuration
 
-Copy `.env.example` to `.env` and fill in at least these values:
+Copy `.env.example` to `.env` and fill in the required values:
 
 ```env
 AZURE_OPENAI_ENDPOINT=https://YOUR-RESOURCE-NAME.openai.azure.com
@@ -45,87 +98,177 @@ AZURE_OPENAI_JUDGE_MODEL=gpt-4.1
 SKILL_REVIEW_LANGUAGE=en
 ```
 
-If you use Entra ID, you can omit `AZURE_OPENAI_API_KEY` and instead sign in to Azure so that `DefaultAzureCredential` takes effect.
+Optional environment variables:
 
-`AZURE_OPENAI_TOKEN_SCOPE` defaults to `https://ai.azure.com/.default`. If your environment requires a different scope, you can override this environment variable directly.
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AZURE_OPENAI_TOKEN_SCOPE` | `https://ai.azure.com/.default` | Token scope for Entra ID auth |
+| `SKILL_REVIEW_GRADE_ROUNDS` | `1` | Number of grading rounds per case (majority vote) |
+| `SKILL_REVIEW_CASE_CACHE_DIR` | _(disabled)_ | Directory to cache generated cases |
 
-The current implementation uses this client pattern:
-
-```python
-from openai import AzureOpenAI
-
-client = AzureOpenAI(
-    api_version="2025-03-01-preview",
-    azure_endpoint="https://YOUR-RESOURCE-NAME.openai.azure.com/",
-    api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-)
-```
+If you use Entra ID, omit `AZURE_OPENAI_API_KEY` and sign in to Azure so that `DefaultAzureCredential` takes effect.
 
 ## Usage
 
-### 1. Review a single skill file
+### Review a single skill file
 
 ```bash
-skill-reviewer review --skill C:\path\to\SKILL.md
+skill-reviewer review --skill path/to/SKILL.md
 ```
 
-### 2. Review a skill directory
+### Review a skill directory
 
-If the directory contains `SKILL.md` and `references/*.md`, the reviewer will load them together.
+If the directory contains `SKILL.md` and files under `references/`, `docs/`, or `examples/`, the reviewer loads them together.
 
 ```bash
-skill-reviewer review --skill C:\path\to\my-skill
+skill-reviewer review --skill path/to/my-skill
 ```
 
-If the skill directory also contains `md / py / json / yml / yaml` files under `examples/`, `docs/`, or `references/`, the reviewer will bundle them into the review context as well.
-
-### 3. Specify a baseline scenario dataset
+### Use a baseline scenario dataset
 
 ```bash
-skill-reviewer review --skill C:\path\to\my-skill --dataset datasets\azure_sdk_baseline.yaml
+skill-reviewer review --skill path/to/my-skill --dataset datasets/azure_sdk_baseline.yaml
 ```
 
-### 4. Specify output directory and language
+### Specify output directory and language
 
 ```bash
-skill-reviewer review --skill C:\path\to\my-skill --out artifacts --language en
+skill-reviewer review --skill path/to/my-skill --out artifacts
 ```
 
-### 5. Use as a CI gate
+### Use as a CI gate
 
 ```bash
-skill-reviewer review --skill C:\path\to\my-skill --require-verdict approve
+skill-reviewer review --skill path/to/my-skill --require-verdict approve
 ```
 
-If the final result falls below the required verdict, the command returns a non-zero exit code, making it easy to plug into a PR pipeline.
+Exit code `2` if the final verdict is below the required threshold.
+
+### Improve review stability
+
+Enable case caching and multi-round grading for deterministic results:
+
+```bash
+skill-reviewer review \
+  --skill path/to/my-skill \
+  --case-cache-dir .cache/cases \
+  --grade-rounds 3
+```
+
+- **`--case-cache-dir`** — Caches generated cases keyed by a SHA-256 fingerprint of the skill content. Same skill content = same cases across runs.
+- **`--grade-rounds N`** — Runs the grader N times per case with different seeds, then picks the verdict by majority vote and scores from the median round. Recommended value: `3`.
+
+## CLI Reference
+
+```
+skill-reviewer review [OPTIONS]
+
+Required:
+  --skill PATH              Path to a SKILL.md file or skill directory
+
+Optional:
+  --dataset PATH            YAML dataset of predefined review cases
+  --out DIR                 Output directory (default: artifacts)
+  --language LANG           Report language, e.g. en, zh-CN
+  --review-model MODEL      Override AZURE_OPENAI_REVIEW_MODEL
+  --judge-model MODEL       Override AZURE_OPENAI_JUDGE_MODEL
+  --require-verdict LEVEL   Fail if verdict < LEVEL (approve|needs_revision|reject)
+  --grade-rounds N          Grading rounds per case for majority vote (default: 1)
+  --case-cache-dir DIR      Cache directory for generated cases
+```
 
 ## Understanding Review Results
 
-The final report produces one of three verdicts:
+### Verdicts
 
-- `approve`
-- `needs_revision`
-- `reject`
+| Verdict | Meaning |
+|---------|---------|
+| `approve` | Skill is ready for use |
+| `needs_revision` | Issues found that should be addressed |
+| `reject` | Critical problems, must not be published |
 
-The verdict is based on two factors:
+### Verdict Rules
 
-- Static review scores and high-risk findings
-- Dynamic scenario execution pass rate, failure count, and average score
+**Reject** when any of:
+- 2+ case failures
+- 2+ high-severity static findings
+- Static score < 2.80
+- Safety floor <= 2
 
-## Recommended Integration
+**Needs revision** when any of:
+- 1 case failure
+- Any high-severity static finding
+- Static review verdict is not `approve`
+- Average case score < 4.00
+- Safety floor <= 3
 
-For production use, we recommend integrating this reviewer into your skill repository's PR workflow:
+### Case Categories
 
-1. Trigger the reviewer when a new skill is submitted
-2. Generate `report.md`
-3. If the result is `reject`, block the merge
-4. If the result is `needs_revision`, require the author to revise
-5. Only `approve` allows merging into the main branch
+Each generated case is classified into one of five categories:
+
+| Category | Focus |
+|----------|-------|
+| `happy_path` | Standard workflow correctness |
+| `security` | Authentication, credential management, secret handling |
+| `troubleshooting` | Error diagnosis and resolution guidance |
+| `edge_case` | Unusual environments or constraints |
+| `adversarial` | Out-of-scope, misleading, or hallucination-probing prompts |
+| `code_generation` | Generate working code; validated for syntax, security, and completeness |
+
+### Code Validation
+
+For `code_generation` cases (or any case whose answer contains code blocks), the reviewer runs automated validation before grading:
+
+- **Syntax check** — Python code is parsed with `ast.parse()`; JavaScript/TypeScript code is checked for unmatched braces and parentheses
+- **Security scan** — Detects hardcoded secrets, disabled TLS verification, hardcoded connection strings
+- **Completeness check** — Detects placeholder patterns (`<YOUR_KEY>`, `... # TODO`, `pass # implement`), missing imports
+- **Results fed to judge** — The grading LLM receives code validation results as objective evidence, anchoring its scores to facts rather than subjective impression
+
+Cases with `requires_code: true` will **fail** if no code blocks are found in the answer.
+
+### Report Output
+
+Each run produces two files in the output directory:
+- `report.json` — Machine-readable full report
+- `report.md` — Human-readable report with must-cover and red-flag checklists
+
+The report includes a `skill_fingerprint` field (SHA-256 of skill content) for traceability.
+
+## Stability Design
+
+The reviewer uses several mechanisms to ensure the same skill produces consistent results across runs:
+
+| Mechanism | What it does |
+|-----------|-------------|
+| `temperature=0` | All LLM calls use zero temperature |
+| `seed=42` | Fixed seed for all structured parsing and case execution |
+| Case caching | Generated cases are cached by skill content fingerprint |
+| Score anchoring | Grading prompt uses mechanical scoring rules (subtract from 5 per miss/flag) |
+| Multi-round grading | Optional majority vote across N rounds with different seeds |
+| Content fingerprint | SHA-256 hash tracks whether skill content has changed |
+
+## Security
+
+The reviewer includes multiple layers of security protection:
+
+- **Preflight check** — Rejects skills containing prompt injection, fake system tags, obfuscated content, or instructions that manipulate the reviewer. Runs before any LLM call.
+- **Content sanitization** — Strips HTML comments and zero-width characters; flags potential injection patterns.
+- **Safety scoring** — Both static review and case-based review score safety independently. Skills with hard-coded secrets, disabled TLS, or credential misuse are penalized.
 
 ## Key Files
 
-- `src/skill_reviewer/cli.py`: CLI entry point
-- `src/skill_reviewer/reviewer.py`: Main workflow
-- `src/skill_reviewer/prompts.py`: Planner / runner / judge prompts
-- `src/skill_reviewer/models.py`: Structured schemas
-- `datasets/azure_sdk_baseline.yaml`: Optional baseline scenarios
+| File | Description |
+|------|-------------|
+| `src/skill_reviewer/cli.py` | CLI entry point |
+| `src/skill_reviewer/reviewer.py` | Main review workflow and aggregation |
+| `src/skill_reviewer/prompts.py` | Prompt templates for profile, static review, case generation, and grading |
+| `src/skill_reviewer/models.py` | Pydantic schemas for all structured outputs |
+| `src/skill_reviewer/code_validator.py` | Code block extraction, syntax checking, and security scanning |
+| `src/skill_reviewer/loader.py` | Skill package loading, sanitization, and preflight checks |
+| `src/skill_reviewer/config.py` | Configuration from environment variables |
+| `src/skill_reviewer/azure_client.py` | Azure OpenAI client construction |
+| `datasets/azure_sdk_baseline.yaml` | Predefined baseline scenario dataset |
+
+## License
+
+[MIT](LICENSE)

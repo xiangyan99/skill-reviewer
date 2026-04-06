@@ -28,6 +28,16 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=("approve", "needs_revision", "reject"),
         help="Fail the command if the final verdict is lower than this threshold.",
     )
+    review.add_argument(
+        "--grade-rounds",
+        type=int,
+        default=1,
+        help="Number of grading rounds per case for majority-vote consensus (default: 1).",
+    )
+    review.add_argument(
+        "--case-cache-dir",
+        help="Directory to cache generated cases. Reuses cases when skill content is unchanged.",
+    )
     return parser
 
 
@@ -67,6 +77,8 @@ def main() -> None:
             output_dir=args.out,
             review_model=args.review_model,
             judge_model=args.judge_model,
+            grade_rounds=args.grade_rounds,
+            case_cache_dir=args.case_cache_dir,
         )
         reviewer = HarnessSkillReviewer(config)
         report, artifact_dir = reviewer.review(args.skill, args.dataset)

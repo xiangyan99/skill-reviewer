@@ -1,6 +1,8 @@
 cases:
   - case_id: baseline-01
     name: Setup and minimal example
+    category: happy_path
+    difficulty: basic
     scenario: A new user wants to get started with the SDK or service covered by the skill.
     user_prompt: Give me the prerequisites, install steps, authentication approach, and a minimal runnable example for the Azure SDK covered by this skill.
     evaluation_focus:
@@ -17,6 +19,8 @@ cases:
       - Omits authentication completely.
   - case_id: baseline-02
     name: Security and credential guidance
+    category: security
+    difficulty: intermediate
     scenario: The user wants a secure production-ready recommendation.
     user_prompt: What is the safest way to authenticate to this Azure SDK in production, and what should I avoid?
     evaluation_focus:
@@ -31,6 +35,8 @@ cases:
       - Pretends there is no security tradeoff.
   - case_id: baseline-03
     name: Troubleshooting
+    category: troubleshooting
+    difficulty: intermediate
     scenario: The user hit an auth or configuration issue while following the skill.
     user_prompt: I followed the guidance but I still cannot connect. Give me the top troubleshooting checks in priority order.
     evaluation_focus:
@@ -43,3 +49,25 @@ cases:
     red_flags:
       - Generic advice with no ordering.
       - No mention of credentials, endpoint, or configuration validation.
+  - case_id: baseline-04
+    name: Core workflow code generation
+    category: code_generation
+    difficulty: intermediate
+    requires_code: true
+    expected_language: python
+    scenario: The user asks for a complete, working script that demonstrates the primary use case of the SDK covered by this skill.
+    user_prompt: Write me a complete Python script that demonstrates the core workflow covered by this skill. I need working code I can copy-paste and run after filling in my credentials.
+    evaluation_focus:
+      - correctness
+      - completeness
+      - actionability
+    must_cover:
+      - Code includes proper import statements for the SDK package.
+      - Code includes authentication setup using a recommended credential approach.
+      - Code demonstrates the core operation (e.g. create/read/list resources).
+      - Code includes basic error handling for API calls.
+    red_flags:
+      - Invented API methods or client classes that do not exist in the SDK.
+      - Hardcoded credentials or connection strings in the code.
+      - Code is just a stub with pass or TODO placeholders.
+      - Missing import statements.

@@ -28,6 +28,8 @@ class ReviewerConfig:
     output_dir: Path
     max_generated_cases: int = 6
     max_reference_files: int = 8
+    grade_rounds: int = 1
+    case_cache_dir: Path | None = None
 
     @classmethod
     def from_env(
@@ -37,6 +39,8 @@ class ReviewerConfig:
         output_dir: str | None = None,
         review_model: str | None = None,
         judge_model: str | None = None,
+        grade_rounds: int | None = None,
+        case_cache_dir: str | None = None,
     ) -> "ReviewerConfig":
         load_dotenv(override=True)
 
@@ -57,6 +61,9 @@ class ReviewerConfig:
             "https://ai.azure.com/.default",
         )
 
+        resolved_grade_rounds = grade_rounds or int(os.getenv("SKILL_REVIEW_GRADE_ROUNDS", "1"))
+        resolved_cache_dir = case_cache_dir or os.getenv("SKILL_REVIEW_CASE_CACHE_DIR")
+
         return cls(
             azure_endpoint=_normalize_azure_endpoint(endpoint),
             api_key=os.getenv("AZURE_OPENAI_API_KEY"),
@@ -66,4 +73,6 @@ class ReviewerConfig:
             token_scope=token_scope,
             language=resolved_language,
             output_dir=resolved_output_dir,
+            grade_rounds=resolved_grade_rounds,
+            case_cache_dir=Path(resolved_cache_dir) if resolved_cache_dir else None,
         )
