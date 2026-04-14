@@ -5,19 +5,16 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "skill-reviewer"
 version = "0.1.0"
-description = "Harness-based reviewer for Azure SDK skills powered by Azure OpenAI"
+description = "Harness-based reviewer for Azure SDK skills powered by GitHub Copilot SDK"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
-  "openai>=1.42.0,<3",
+  "github-copilot-sdk",
   "pydantic>=2.8,<3",
   "PyYAML>=6.0.2,<7",
   "python-dotenv>=1.0.1,<2",
 ]
-
-[project.optional-dependencies]
-identity = ["azure-identity>=1.16,<2"]
 
 [project.scripts]
 skill-reviewer = "skill_reviewer.cli:main"

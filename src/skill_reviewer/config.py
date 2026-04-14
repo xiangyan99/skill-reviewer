@@ -4,28 +4,28 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
 from dotenv import load_dotenv
 
 
-def _normalize_azure_endpoint(endpoint: str) -> str:
-    cleaned = endpoint.strip().rstrip("/")
-    if cleaned.endswith("/openai/v1"):
-        cleaned = cleaned[: -len("/openai/v1")]
-    elif cleaned.endswith("/openai"):
-        cleaned = cleaned[: -len("/openai")]
-    return f"{cleaned}/"
+def load_config_file(path: str | Path) -> dict:
+    """Load a YAML config file and return its contents as a dict."""
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Config file not found: {p}")
+    data = yaml.safe_load(p.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"Config file must be a YAML mapping: {p}")
+    return data
 
 
 @dataclass(slots=True)
 class ReviewerConfig:
-    azure_endpoint: str
-    api_key: str | None
-    api_version: str
     review_model: str
     judge_model: str
-    token_scope: str
     language: str
     output_dir: Path
+    github_token: str | None = None
     max_generated_cases: int = 6
     max_reference_files: int = 8
     grade_rounds: int = 1
@@ -44,35 +44,33 @@ class ReviewerConfig:
     ) -> "ReviewerConfig":
         load_dotenv(override=True)
 
-        endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-        if not endpoint:
-            raise ValueError("Missing AZURE_OPENAI_ENDPOINT.")
-        api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2025-03-01-preview")
-
-        resolved_review_model = review_model or os.getenv("AZURE_OPENAI_REVIEW_MODEL")
+        resolved_review_model = (
+            review_model
+            or os.getenv("SKILL_REVIEW_MODEL")
+        )
         if not resolved_review_model:
-            raise ValueError("Missing AZURE_OPENAI_REVIEW_MODEL.")
+            raise ValueError(
+                "Missing review model. Set SKILL_REVIEW_MODEL or pass --review-model."
+            )
 
-        resolved_judge_model = judge_model or os.getenv("AZURE_OPENAI_JUDGE_MODEL") or resolved_review_model
+        resolved_judge_model = (
+            judge_model
+            or os.getenv("SKILL_JUDGE_MODEL")
+            or resolved_review_model
+        )
         resolved_language = language or os.getenv("SKILL_REVIEW_LANGUAGE") or "en"
         resolved_output_dir = Path(output_dir or "artifacts")
-        token_scope = os.getenv(
-            "AZURE_OPENAI_TOKEN_SCOPE",
-            "https://ai.azure.com/.default",
-        )
 
         resolved_grade_rounds = grade_rounds or int(os.getenv("SKILL_REVIEW_GRADE_ROUNDS", "1"))
         resolved_cache_dir = case_cache_dir or os.getenv("SKILL_REVIEW_CASE_CACHE_DIR")
+        github_token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN")
 
         return cls(
-            azure_endpoint=_normalize_azure_endpoint(endpoint),
-            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-            api_version=api_version,
             review_model=resolved_review_model,
             judge_model=resolved_judge_model,
-            token_scope=token_scope,
             language=resolved_language,
             output_dir=resolved_output_dir,
+            github_token=github_token,
             grade_rounds=resolved_grade_rounds,
             case_cache_dir=Path(resolved_cache_dir) if resolved_cache_dir else None,
         )

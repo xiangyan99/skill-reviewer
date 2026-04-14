@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 
 class SkillPackage(BaseModel):
@@ -93,7 +93,7 @@ class MustCoverResult(BaseModel):
 
 
 class RedFlagResult(BaseModel):
-    flag: str
+    flag: str = Field(validation_alias=AliasChoices("flag", "criterion"))
     triggered: bool
     evidence: str = ""
 
@@ -161,6 +161,8 @@ class ReviewReport(BaseModel):
     generated_at: datetime
     skill_path: str
     skill_fingerprint: str = ""
+    review_model: str = ""
+    judge_model: str = ""
     language: str
     profile: SkillProfile
     static_review: SkillStaticReview

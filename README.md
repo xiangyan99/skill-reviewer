@@ -1,7 +1,7 @@
 # Azure SDK Skill Reviewer
 
 
-A harness-based reviewer for Azure SDK skills powered by Azure OpenAI. Rather than simply asking a model "is this skill good?", it breaks the review into four reproducible stages:
+A harness-based reviewer for Azure SDK skills powered by [GitHub Copilot SDK](https://github.com/github/copilot-sdk). Rather than simply asking a model "is this skill good?", it breaks the review into four reproducible stages:
 
 1. **Profile** — Extract the skill's declared scope, target audience, and covered Azure services & SDKs.
 2. **Static Review** — Review the skill text directly, scoring technical correctness, completeness, safety, clarity, and actionability.
@@ -39,12 +39,12 @@ Skill Package
          ▼
 ┌──────────────────┐     ┌──────────────────┐
 │ Case Generation  │────▶│  Case Caching    │
-│  (or Dataset)    │     │  (fingerprint)   │
+│  (or Scenario)   │     │  (fingerprint)   │
 └────────┬─────────┘     └──────────────────┘
          │
          ▼
 ┌──────────────────┐
-│  Case Execution  │──▶ Assistant answers (seed=42)
+│  Case Execution  │──▶ Assistant answers
 └────────┬─────────┘
          │
          ▼
@@ -79,34 +79,24 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-For Microsoft Entra ID authentication (optional):
-
-```bash
-pip install -e ".[identity]"
-```
-
 ## Configuration
 
-Copy `.env.example` to `.env` and fill in the required values:
+Create a `.env` file in the project root:
 
 ```env
-AZURE_OPENAI_ENDPOINT=https://YOUR-RESOURCE-NAME.openai.azure.com
-AZURE_OPENAI_API_KEY=...
-AZURE_OPENAI_API_VERSION=2025-03-01-preview
-AZURE_OPENAI_REVIEW_MODEL=gpt-4.1-mini
-AZURE_OPENAI_JUDGE_MODEL=gpt-4.1
+GH_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+SKILL_REVIEW_MODEL=gpt-4o
 SKILL_REVIEW_LANGUAGE=en
 ```
 
-Optional environment variables:
-
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AZURE_OPENAI_TOKEN_SCOPE` | `https://ai.azure.com/.default` | Token scope for Entra ID auth |
+| `GH_TOKEN` or `GITHUB_TOKEN` | _(required)_ | GitHub token for Copilot authentication |
+| `SKILL_REVIEW_MODEL` | _(required)_ | Model for case execution (e.g. `gpt-4o`, `claude-sonnet-4`) |
+| `SKILL_JUDGE_MODEL` | same as `SKILL_REVIEW_MODEL` | Model for profile extraction, static review, and grading |
+| `SKILL_REVIEW_LANGUAGE` | `en` | Report language |
 | `SKILL_REVIEW_GRADE_ROUNDS` | `1` | Number of grading rounds per case (majority vote) |
 | `SKILL_REVIEW_CASE_CACHE_DIR` | _(disabled)_ | Directory to cache generated cases |
-
-If you use Entra ID, omit `AZURE_OPENAI_API_KEY` and sign in to Azure so that `DefaultAzureCredential` takes effect.
 
 ## Usage
 
@@ -124,10 +114,33 @@ If the directory contains `SKILL.md` and files under `references/`, `docs/`, or 
 skill-reviewer review --skill path/to/my-skill
 ```
 
-### Use a baseline scenario dataset
+### Use a predefined scenario
 
 ```bash
-skill-reviewer review --skill path/to/my-skill --dataset datasets/azure_sdk_baseline.yaml
+skill-reviewer review --skill path/to/my-skill --scenario scenarios/azure_sdk_baseline.yaml
+```
+
+### Use a config file for model settings
+
+Config files let you test the same scenario against different model combinations:
+
+```bash
+# Test with GPT-4o
+skill-reviewer review --skill path/to/my-skill --config configs/gpt-4o.yaml
+
+# Test with Claude
+skill-reviewer review --skill path/to/my-skill --config configs/claude-sonnet.yaml
+
+# Combine scenario + config
+skill-reviewer review --skill path/to/my-skill --scenario scenarios/azure_sdk_baseline.yaml --config configs/mixed.yaml
+```
+
+Config file format (`configs/gpt-4o.yaml`):
+
+```yaml
+review_model: gpt-4o
+judge_model: gpt-4o
+language: en
 ```
 
 ### Specify output directory and language
@@ -167,15 +180,18 @@ Required:
   --skill PATH              Path to a SKILL.md file or skill directory
 
 Optional:
-  --dataset PATH            YAML dataset of predefined review cases
+  --scenario PATH           YAML scenario of predefined review cases
+  --config PATH             YAML config file for model and review settings
   --out DIR                 Output directory (default: artifacts)
   --language LANG           Report language, e.g. en, zh-CN
-  --review-model MODEL      Override AZURE_OPENAI_REVIEW_MODEL
-  --judge-model MODEL       Override AZURE_OPENAI_JUDGE_MODEL
+  --review-model MODEL      Override SKILL_REVIEW_MODEL
+  --judge-model MODEL       Override SKILL_JUDGE_MODEL
   --require-verdict LEVEL   Fail if verdict < LEVEL (approve|needs_revision|reject)
   --grade-rounds N          Grading rounds per case for majority vote (default: 1)
   --case-cache-dir DIR      Cache directory for generated cases
 ```
+
+Precedence: CLI flags > config file > environment variables > `.env` file.
 
 ## Understanding Review Results
 
@@ -240,11 +256,9 @@ The reviewer uses several mechanisms to ensure the same skill produces consisten
 
 | Mechanism | What it does |
 |-----------|-------------|
-| `temperature=0` | All LLM calls use zero temperature |
-| `seed=42` | Fixed seed for all structured parsing and case execution |
 | Case caching | Generated cases are cached by skill content fingerprint |
 | Score anchoring | Grading prompt uses mechanical scoring rules (subtract from 5 per miss/flag) |
-| Multi-round grading | Optional majority vote across N rounds with different seeds |
+| Multi-round grading | Optional majority vote across N rounds |
 | Content fingerprint | SHA-256 hash tracks whether skill content has changed |
 
 ## Security
@@ -266,8 +280,9 @@ The reviewer includes multiple layers of security protection:
 | `src/skill_reviewer/code_validator.py` | Code block extraction, syntax checking, and security scanning |
 | `src/skill_reviewer/loader.py` | Skill package loading, sanitization, and preflight checks |
 | `src/skill_reviewer/config.py` | Configuration from environment variables |
-| `src/skill_reviewer/azure_client.py` | Azure OpenAI client construction |
-| `datasets/azure_sdk_baseline.yaml` | Predefined baseline scenario dataset |
+| `src/skill_reviewer/copilot_client.py` | GitHub Copilot SDK client wrapper |
+| `scenarios/azure_sdk_baseline.yaml` | Predefined baseline review scenario |
+| `configs/` | Model configuration presets |
 
 ## License
 

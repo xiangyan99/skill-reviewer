@@ -1,0 +1,3 @@
+review_model: gpt-4o
+judge_model: gpt-4o
+language: en

@@ -9,7 +9,9 @@ from pathlib import Path
 
 import yaml
 
-from skill_reviewer.azure_client import build_openai_client
+from copilot import CopilotClient, SubprocessConfig
+
+from skill_reviewer.copilot_client import copilot_chat, copilot_parse_structured
 from skill_reviewer.config import ReviewerConfig
 from skill_reviewer.loader import load_skill_package, preflight_check
 
@@ -67,6 +69,8 @@ def _render_markdown(report: ReviewReport) -> str:
         f"- Run ID: `{report.run_id}`",
         f"- Skill: `{report.skill_path}`",
         f"- Fingerprint: `{report.skill_fingerprint}`",
+        f"- Review model: `{report.review_model}`",
+        f"- Judge model: `{report.judge_model}`",
         f"- Final verdict: `{report.aggregate.final_verdict}`",
         f"- Static score: `{report.aggregate.static_score:.2f}`",
         f"- Average case score: `{report.aggregate.average_case_score:.2f}`",
@@ -203,35 +207,24 @@ def _render_markdown(report: ReviewReport) -> str:
 class HarnessSkillReviewer:
     def __init__(self, config: ReviewerConfig):
         self.config = config
-        self.client = build_openai_client(config)
+        self._client: CopilotClient | None = None
 
-    def _parse_structured(self, model: str, messages: list[dict[str, str]], schema, *, seed: int = 42):
-        completion = self.client.beta.chat.completions.parse(
-            model=model,
-            messages=messages,
-            temperature=0,
-            seed=seed,
-            response_format=schema,
-        )
-        message = completion.choices[0].message
-        if getattr(message, "parsed", None) is None:
-            raise RuntimeError("Structured parse failed.")
-        return message.parsed
+    async def _parse_structured(self, model: str, messages: list[dict[str, str]], schema, *, seed: int = 42):
+        return await copilot_parse_structured(self._client, model, messages, schema)
 
-    def _run_case(self, skill: SkillPackage, case: ReviewCase) -> str:
-        response = self.client.responses.create(
-            model=self.config.review_model,
-            instructions=executor_instructions(skill),
-            input=case.user_prompt,
-            temperature=0,
-        )
-        answer = (response.output_text or "").strip()
+    async def _run_case(self, skill: SkillPackage, case: ReviewCase) -> str:
+        messages = [
+            {"role": "system", "content": executor_instructions(skill)},
+            {"role": "user", "content": case.user_prompt},
+        ]
+        answer = await copilot_chat(self._client, self.config.review_model, messages)
+        answer = answer.strip()
         if not answer:
             raise RuntimeError(f"Empty answer for case {case.case_id}")
         return answer
 
-    def _load_dataset(self, dataset_path: Path) -> list[ReviewCase]:
-        payload = yaml.safe_load(dataset_path.read_text(encoding="utf-8"))
+    def _load_scenario(self, scenario_path: Path) -> list[ReviewCase]:
+        payload = yaml.safe_load(scenario_path.read_text(encoding="utf-8"))
         case_set = GeneratedCaseSet.model_validate(payload)
         return case_set.cases
 
@@ -266,7 +259,7 @@ class HarnessSkillReviewer:
         )
         logger.info("Saved %d cases to cache %s", len(cases), path)
 
-    def _grade_with_consensus(
+    async def _grade_with_consensus(
         self,
         skill: SkillPackage,
         case: ReviewCase,
@@ -282,7 +275,7 @@ class HarnessSkillReviewer:
         rounds = max(1, self.config.grade_rounds)
         grades: list[CaseGrade] = []
         for i in range(rounds):
-            grade = self._parse_structured(
+            grade = await self._parse_structured(
                 self.config.judge_model,
                 grade_messages(
                     skill, case, assistant_answer, self.config.language,
@@ -561,6 +554,8 @@ class HarnessSkillReviewer:
             run_id=datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S"),
             generated_at=datetime.now(timezone.utc),
             skill_path=str(Path(skill_path).resolve()),
+            review_model=self.config.review_model,
+            judge_model=self.config.judge_model,
             language=self.config.language,
             profile=SkillProfile(
                 title="(pre-flight rejected)",
@@ -588,7 +583,7 @@ class HarnessSkillReviewer:
             ),
         )
 
-    def review(self, skill_path: str | Path, dataset_path: str | Path | None = None) -> tuple[ReviewReport, Path]:
+    async def review(self, skill_path: str | Path, scenario_path: str | Path | None = None) -> tuple[ReviewReport, Path]:
         skill = load_skill_package(
             skill_path,
             max_reference_files=self.config.max_reference_files,
@@ -607,8 +602,24 @@ class HarnessSkillReviewer:
             return report, artifact_dir
         print("  Passed")
 
+        async with CopilotClient(self._build_client_config()) as client:
+            self._client = client
+            return await self._review_with_client(skill, skill_path, fingerprint, scenario_path)
+
+    def _build_client_config(self) -> SubprocessConfig | None:
+        if self.config.github_token:
+            return SubprocessConfig(github_token=self.config.github_token)
+        return None
+
+    async def _review_with_client(
+        self,
+        skill: SkillPackage,
+        skill_path: str | Path,
+        fingerprint: str,
+        scenario_path: str | Path | None,
+    ) -> tuple[ReviewReport, Path]:
         print("[2/6] Extracting skill profile...")
-        profile = self._parse_structured(
+        profile = await self._parse_structured(
             self.config.judge_model,
             profile_messages(skill, self.config.language),
             SkillProfile,
@@ -616,7 +627,7 @@ class HarnessSkillReviewer:
         print(f"  Title: {profile.title}")
 
         print("[3/6] Running static review...")
-        static_review = self._parse_structured(
+        static_review = await self._parse_structured(
             self.config.judge_model,
             static_review_messages(skill, profile, self.config.language),
             SkillStaticReview,
@@ -624,15 +635,15 @@ class HarnessSkillReviewer:
         print(f"  Verdict: {static_review.verdict} | Score: {static_review.scores.average:.2f} | Findings: {len(static_review.findings)}")
 
         print("[4/6] Loading test cases...")
-        if dataset_path:
-            cases = self._load_dataset(Path(dataset_path).resolve())
-            print(f"  Loaded {len(cases)} case(s) from dataset")
+        if scenario_path:
+            cases = self._load_scenario(Path(scenario_path).resolve())
+            print(f"  Loaded {len(cases)} case(s) from scenario")
         else:
             # Try loading cached cases for this skill fingerprint
             cases = self._load_cached_cases(fingerprint)
             if cases is None:
                 print("  Generating cases...")
-                generated = self._parse_structured(
+                generated = await self._parse_structured(
                     self.config.judge_model,
                     case_generation_messages(
                         skill,
@@ -652,31 +663,51 @@ class HarnessSkillReviewer:
         case_results: list[CaseResult] = []
         for i, case in enumerate(cases, 1):
             print(f"  [{i}/{len(cases)}] {case.case_id}: {case.name}", end="", flush=True)
-            assistant_answer = self._run_case(skill, case)
+            try:
+                assistant_answer = await self._run_case(skill, case)
 
-            # Run code validation for cases that require or contain code
-            code_validation = None
-            if case.requires_code or case.category == "code_generation" or "```" in assistant_answer:
-                requires = case.requires_code or case.category == "code_generation"
-                code_validation = validate_answer_code(
-                    answer=assistant_answer,
-                    expected_sdks=profile.claimed_sdks,
-                    requires_code=requires,
-                )
+                # Run code validation for cases that require or contain code
+                code_validation = None
+                if case.requires_code or case.category == "code_generation" or "```" in assistant_answer:
+                    requires = case.requires_code or case.category == "code_generation"
+                    code_validation = validate_answer_code(
+                        answer=assistant_answer,
+                        expected_sdks=profile.claimed_sdks,
+                        requires_code=requires,
+                    )
 
-            grade = self._grade_with_consensus(
-                skill, case, assistant_answer,
-                code_validation=code_validation,
-            )
-            case_results.append(
-                CaseResult(
-                    case=case,
-                    assistant_answer=assistant_answer,
+                grade = await self._grade_with_consensus(
+                    skill, case, assistant_answer,
                     code_validation=code_validation,
-                    grade=grade,
                 )
-            )
-            print(f" -> {grade.verdict} ({grade.scores.average:.1f})")
+                case_results.append(
+                    CaseResult(
+                        case=case,
+                        assistant_answer=assistant_answer,
+                        code_validation=code_validation,
+                        grade=grade,
+                    )
+                )
+                print(f" -> {grade.verdict} ({grade.scores.average:.1f})")
+            except Exception as exc:
+                logger.warning("Case %s failed: %s", case.case_id, exc)
+                error_scores = RubricScores(
+                    technical_correctness=1, completeness=1,
+                    safety=1, clarity=1, actionability=1,
+                )
+                case_results.append(
+                    CaseResult(
+                        case=case,
+                        assistant_answer=f"[ERROR] {exc}",
+                        grade=CaseGrade(
+                            verdict="fail",
+                            summary=f"Case failed with error: {exc}",
+                            scores=error_scores,
+                            issues=[str(exc)],
+                        ),
+                    )
+                )
+                print(f" -> ERROR: {exc}")
 
         print("[6/6] Aggregating results...")
         report = ReviewReport(
@@ -684,6 +715,8 @@ class HarnessSkillReviewer:
             generated_at=datetime.now(timezone.utc),
             skill_path=str(Path(skill_path).resolve()),
             skill_fingerprint=fingerprint,
+            review_model=self.config.review_model,
+            judge_model=self.config.judge_model,
             language=self.config.language,
             profile=profile,
             static_review=static_review,

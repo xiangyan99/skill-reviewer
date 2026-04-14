@@ -1,0 +1,4 @@
+# Use a fast model for case execution, a stronger model for judging
+review_model: claude-opus-4.6
+judge_model: gpt-5.3-codex
+language: en

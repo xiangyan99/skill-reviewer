@@ -1,28 +1,28 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 
-from openai import APIConnectionError, APIError, APIStatusError
-
-from skill_reviewer.config import ReviewerConfig
+from skill_reviewer.config import ReviewerConfig, load_config_file
 from skill_reviewer.reviewer import HarnessSkillReviewer
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="skill-reviewer",
-        description="Review Azure SDK skills with a harness-based Azure OpenAI evaluator.",
+        description="Review Azure SDK skills with a harness-based GitHub Copilot evaluator.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     review = subparsers.add_parser("review", help="Review a skill file or directory.")
     review.add_argument("--skill", required=True, help="Path to a SKILL.md file or skill directory.")
-    review.add_argument("--dataset", help="Optional YAML dataset path.")
+    review.add_argument("--scenario", help="Optional YAML scenario path with predefined review cases.")
+    review.add_argument("--config", help="Optional YAML config file for model and review settings.")
     review.add_argument("--out", default="artifacts", help="Output directory for reports.")
     review.add_argument("--language", help="Report language, for example zh-CN or en-US.")
-    review.add_argument("--review-model", help="Override AZURE_OPENAI_REVIEW_MODEL.")
-    review.add_argument("--judge-model", help="Override AZURE_OPENAI_JUDGE_MODEL.")
+    review.add_argument("--review-model", help="Override SKILL_REVIEW_MODEL.")
+    review.add_argument("--judge-model", help="Override SKILL_JUDGE_MODEL.")
     review.add_argument(
         "--require-verdict",
         choices=("approve", "needs_revision", "reject"),
@@ -51,17 +51,7 @@ def _verdict_rank(value: str) -> int:
 
 
 def _format_error(exc: Exception) -> str:
-    if isinstance(exc, APIStatusError):
-        body = getattr(exc, "body", None)
-        return f"{exc.__class__.__name__} status={exc.status_code} body={body}"
-    if isinstance(exc, APIConnectionError):
-        cause = getattr(exc, "__cause__", None)
-        if cause:
-            return f"{exc.__class__.__name__}: {cause.__class__.__name__}: {cause}"
-        return f"{exc.__class__.__name__}: {exc}"
-    if isinstance(exc, APIError):
-        return f"{exc.__class__.__name__}: {exc}"
-    return str(exc)
+    return f"{exc.__class__.__name__}: {exc}"
 
 
 def main() -> None:
@@ -72,16 +62,17 @@ def main() -> None:
         parser.error(f"Unsupported command: {args.command}")
 
     try:
+        file_overrides = load_config_file(args.config) if args.config else {}
         config = ReviewerConfig.from_env(
-            language=args.language,
+            language=args.language or file_overrides.get("language"),
             output_dir=args.out,
-            review_model=args.review_model,
-            judge_model=args.judge_model,
-            grade_rounds=args.grade_rounds,
-            case_cache_dir=args.case_cache_dir,
+            review_model=args.review_model or file_overrides.get("review_model"),
+            judge_model=args.judge_model or file_overrides.get("judge_model"),
+            grade_rounds=args.grade_rounds or file_overrides.get("grade_rounds"),
+            case_cache_dir=args.case_cache_dir or file_overrides.get("case_cache_dir"),
         )
         reviewer = HarnessSkillReviewer(config)
-        report, artifact_dir = reviewer.review(args.skill, args.dataset)
+        report, artifact_dir = asyncio.run(reviewer.review(args.skill, args.scenario))
     except Exception as exc:
         print(f"review failed: {_format_error(exc)}", file=sys.stderr)
         raise SystemExit(1) from exc
